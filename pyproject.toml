@@ -30,6 +30,9 @@ dependencies = [
     "joblib"
 ]
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [project.urls]
 Homepage = "https://github.com/adityoAJA/samudra-ai"
 "Bug Tracker" = "https://github.com/adityoAJA/samudra-ai/issues"
