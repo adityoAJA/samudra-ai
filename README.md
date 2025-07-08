@@ -25,6 +25,9 @@ Anda dapat menginstal SamudraAI langsung dari PyPI menggunakan pip:
 ```bash
 pip install samudra-ai
 ```
+```bash
+pip install numpy pandas xarray tensorflow scikit-learn matplotlib h5netcdf cftime scikit-image joblib
+```
 
 ## Cara Penggunaan Cepat (Quick Start)
 
