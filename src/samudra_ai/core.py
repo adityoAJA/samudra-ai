@@ -1,146 +1,195 @@
-# core.py
+# File: src/samudra_ai/core.py
 
-import numpy as np
-import xarray as xr
-import joblib
-import json
 import os
-from tensorflow.keras.models import load_model as keras_load_model, Model
+import json
+import joblib
+import logging
+import xarray as xr
+import numpy as np
+from tensorflow.keras.models import load_model as keras_load_model
 from tensorflow.keras.layers import LeakyReLU
 from tensorflow.keras.optimizers import Adam
-from sklearn.model_selection import train_test_split
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
-from .preprocessing import normalize_data, create_sequences
 from .models import build_cnn_bilstm
-from .training import set_seeds, get_default_callbacks
-from .plotting import plot_history_metric
-from .utils import NumpyEncoder
+from .utils import NumpyEncoder, save_to_netcdf
+from .data_loader import load_and_mask_dataset
+from .trainer import prepare_training_data, plot_training_history
+from .evaluator import evaluate_model
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class SamudraAI:
     def __init__(self, time_seq: int = 9, lstm_units: int = 64, learning_rate: float = 1e-4):
         self.time_seq = time_seq
         self.lstm_units = lstm_units
         self.learning_rate = learning_rate
-        self.model: Model = None
+        self.model = None
         self.scaler_X = None
         self.scaler_y = None
         self.history = None
-        self.obs_mask = None # Untuk menyimpan mask dari data observasi
-        self.target_coords = None
-        self.target_dims = None
+        self.obs_for_metadata = None
 
-    def fit(self, x_data_hist: xr.DataArray, y_data_obs: xr.DataArray, epochs: int = 100, batch_size: int = 8, validation_split: float = 0.2, seed: int = 42):
-        set_seeds(seed)
-        
-        # Logika krusial dari skrip asli: menyamakan panjang data
-        min_samples = min(x_data_hist.shape[0], y_data_obs.shape[0])
-        x_np = np.nan_to_num(x_data_hist.isel(time=slice(0, min_samples)).values)
-        y_np = np.nan_to_num(y_data_obs.isel(time=slice(0, min_samples)).values)
-        
-        # Simpan informasi koordinat & mask dari data observasi (resolusi tinggi)
-        self.target_coords = y_data_obs.coords
-        self.target_dims = y_data_obs.dims
-        self.obs_mask = xr.where(np.isnan(y_data_obs.isel(time=0)), 0, 1)
+    def fit(self, x_data_hist: xr.DataArray, y_data_obs: xr.DataArray, epochs: int = 100, batch_size: int = 8, test_size: float = 0.2, seed: int = 42):
+        logger.info("🧠 Memulai training model...")
+        self.obs_for_metadata = y_data_obs.copy(deep=True)
 
-        X_scaled, y_scaled, self.scaler_X, self.scaler_y = normalize_data(x_np, y_np)
-        
-        # Logika pembuatan sekuens dari skrip asli
-        X_seq = np.array([X_scaled[i:i+self.time_seq] for i in range(len(X_scaled) - self.time_seq)])
-        y_seq = np.array([y_scaled[i+self.time_seq-1] for i in range(len(y_scaled) - self.time_seq)])
-        
-        X_seq = X_seq[..., np.newaxis]
-        y_seq = y_seq[..., np.newaxis]
-        
-        X_train, X_val, y_train, y_val = train_test_split(X_seq, y_seq, test_size=validation_split, random_state=seed, shuffle=False)
-        
+        X_train, X_test, y_train, y_test, scaler_X, scaler_y = prepare_training_data(
+            x_data_hist, y_data_obs, self.time_seq, seed
+        )
+        self.scaler_X = scaler_X
+        self.scaler_y = scaler_y
+
         input_shape = X_train.shape[1:]
-        output_shape = y_train.shape[1:]
-        
-        self.model = build_cnn_bilstm(input_shape=input_shape, output_shape=output_shape, lstm_units=self.lstm_units)
+        output_shape = y_train.shape[1:3]
+
+        self.model = build_cnn_bilstm(input_shape, output_shape, self.lstm_units)
         self.model.compile(optimizer=Adam(learning_rate=self.learning_rate), loss='mse', metrics=['mae'])
         self.model.summary()
-        
-        callbacks = get_default_callbacks()
-        
-        print(f"🚀 Memulai training untuk {epochs} epochs...")
-        self.history = self.model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, validation_data=(X_val, y_val), callbacks=callbacks, verbose=1)
-        
-        loss, mae = self.model.evaluate(X_val, y_val, verbose=0)
-        print(f"✅ Training dan evaluasi selesai -> MSE: {loss:.4f}, MAE: {mae:.4f}")
-        return self.history
 
-    def predict(self, data_to_correct: xr.DataArray) -> xr.DataArray:
-        if not self.model: raise RuntimeError("Model belum dilatih.")
-        
-        X_future = np.nan_to_num(data_to_correct.values)
-        X_future_reshaped = X_future.reshape(X_future.shape[0], -1)
-        X_future_scaled = self.scaler_X.transform(X_future_reshaped).reshape(X_future.shape)
-        
-        X_future_seq = np.array([X_future_scaled[i:i+self.time_seq] for i in range(len(X_future_scaled) - self.time_seq + 1)])
-        X_future_seq = X_future_seq[..., np.newaxis]
+        callbacks = [EarlyStopping(patience=10, restore_best_weights=True), ReduceLROnPlateau(patience=5, verbose=1)]
+        self.history = self.model.fit(
+            X_train, y_train, epochs=epochs, batch_size=batch_size,
+            validation_data=(X_test, y_test), callbacks=callbacks, verbose=1
+        )
 
-        if X_future_seq.shape[0] == 0: return xr.DataArray()
+        loss, mae = self.model.evaluate(X_test, y_test, verbose=0)
+        logger.info(f"✅ Training selesai -> Final Val Loss (MSE): {loss:.4f}, Final Val MAE: {mae:.4f}")
+
+    def correction(self, data_to_correct: xr.DataArray, save_path: str = None) -> xr.DataArray:
+        if not all([self.model, self.scaler_X, self.scaler_y, self.obs_for_metadata is not None]):
+            raise RuntimeError("Model belum dilatih. Jalankan .fit() terlebih dahulu.")
+
+        logger.info(f"🔬 Mengoreksi data dengan shape: {data_to_correct.shape}...")
+
+        X_future = data_to_correct.fillna(0).values
+        X_future_scaled = self.scaler_X.transform(X_future.reshape(X_future.shape[0], -1)).reshape(X_future.shape)
+        X_future_seq = np.array([X_future_scaled[i:i+self.time_seq] for i in range(len(X_future_scaled) - self.time_seq)])
+
+        X_future_seq = X_future_seq[..., np.newaxis]  # ✅ bentuk ke 5D
+        print("🧪 Input to model.predict:", X_future_seq.shape)
+        print("🧪 Any NaN in input?:", np.isnan(X_future_seq).any())
 
         pred_scaled = self.model.predict(X_future_seq).squeeze()
-        
-        pred_flat = pred_scaled.reshape(pred_scaled.shape[0], -1)
-        pred_original = self.scaler_y.inverse_transform(pred_flat)
-        final_predictions = pred_original.reshape(pred_scaled.shape)
-        
-        valid_time = data_to_correct.time.values[self.time_seq - 1:]
-        num_predictions = final_predictions.shape[0]
 
-        corrected_da = xr.DataArray(
-            final_predictions,
+        pred_original = self.scaler_y.inverse_transform(pred_scaled.reshape(pred_scaled.shape[0], -1)).reshape(pred_scaled.shape)
+
+        obs_mask = self.obs_for_metadata.isel(time=0).notnull()
+        lat_dim_name = next((d for d in obs_mask.dims if 'lat' in d.lower()), 'lat')
+        lon_dim_name = next((d for d in obs_mask.dims if 'lon' in d.lower()), 'lon')
+
+        valid_time = data_to_correct.time.values[self.time_seq - 1 : self.time_seq - 1 + len(pred_original)]
+
+        predicted_da = xr.DataArray(
+            pred_original,
             coords={
-                "time": valid_time[:num_predictions],
-                self.target_dims[1]: self.target_coords[self.target_dims[1]],
-                self.target_dims[2]: self.target_coords[self.target_dims[2]]
+                "time": valid_time,
+                lat_dim_name: obs_mask.coords[lat_dim_name],
+                lon_dim_name: obs_mask.coords[lon_dim_name]
             },
-            dims=self.target_dims
+            dims=["time", lat_dim_name, lon_dim_name],
+            name="corrected"
         )
-        
-        # Logika masking dari skrip asli
-        mask_interp = self.obs_mask.interp_like(corrected_da, method="nearest")
-        corrected_masked_da = corrected_da.where(mask_interp == 1)
-        
-        return corrected_masked_da
 
-    def plot_loss(self, title="Kurva Loss", output_path=None):
-        plot_history_metric(self.history, 'loss', title, 'Loss (MSE)', output_path)
+        if predicted_da.shape[1:] == obs_mask.shape:
+            predicted_masked = predicted_da.where(obs_mask, drop=False)
+        else:
+            logger.warning("Ukuran mask observasi tidak cocok. Koreksi akan disimpan tanpa masking akhir.")
+            predicted_masked = predicted_da
 
-    def plot_mae(self, title="Kurva MAE", output_path=None):
-        plot_history_metric(self.history, 'mae', title, 'MAE', output_path)
+        # Jika disediakan save_path, simpan otomatis
+        if save_path:
+            save_to_netcdf(predicted_masked, save_path)
+
+        logger.info("✅ Koreksi selesai.")
+        return predicted_masked
+
+    def evaluate_and_plot(
+        self,
+        raw_gcm_data: xr.DataArray,
+        ref_data: xr.DataArray,
+        var_name_ref: str,
+        output_dir: str = "hasil_evaluasi",
+        save_corrected_path: str = None):
+        
+        corrected_data = self.predict(raw_gcm_data)
+
+        # Debug log hasil prediksi
+        try:
+            min_val = np.nanmin(corrected_data.values)
+            max_val = np.nanmax(corrected_data.values)
+            print(f"✅ Hasil predict -> min: {min_val:.4f}, max: {max_val:.4f}, shape: {corrected_data.shape}")
+        except Exception as e:
+            print("⚠️ Gagal menghitung min/max hasil predict:", e)
+
+        # Auto-trim obs agar cocok dengan hasil koreksi
+        if corrected_data.sizes['time'] != ref_data.sizes['time']:
+            start_index = self.time_seq - 1
+            ref_data = ref_data.isel(time=slice(start_index, start_index + corrected_data.sizes['time']))
+
+        # Simpan hasil koreksi jika diminta
+        if save_corrected_path:
+            save_to_netcdf(corrected_data, save_corrected_path)
+
+        return evaluate_model(ref_data, raw_gcm_data, corrected_data, var_name_ref, output_dir)
+
+    def plot_history(self, output_dir: str = None):
+        if not self.history:
+            raise ValueError("Model belum dilatih.")
+        plot_training_history(self.history, output_dir)
 
     def save(self, path: str):
+        logger.info(f"💾 Menyimpan model ke direktori: {path}...")
         os.makedirs(path, exist_ok=True)
+
+        # Simpan model dan scaler
         self.model.save(os.path.join(path, "model.keras"))
         joblib.dump(self.scaler_X, os.path.join(path, "scaler_X.gz"))
         joblib.dump(self.scaler_y, os.path.join(path, "scaler_y.gz"))
-        
-        target_info = {
-            'coords': {k: v.values.tolist() for k, v in self.target_coords.items() if k != 'time'},
-            'dims': self.target_dims,
-            'obs_mask': self.obs_mask.values.tolist()
-        }
-        config = {'time_seq': self.time_seq, 'lstm_units': self.lstm_units, 'learning_rate': self.learning_rate}
 
-        with open(os.path.join(path, "config.json"), 'w') as f: json.dump(config, f, cls=NumpyEncoder)
-        with open(os.path.join(path, "target_info.json"), 'w') as f: json.dump(target_info, f, cls=NumpyEncoder)
-        print(f"✅ Model dan komponen berhasil disimpan di: {path}")
+        # Simpan metadata observasi dengan backend yang lebih stabil
+        try:
+            self.obs_for_metadata.to_netcdf(
+                os.path.join(path, "obs_metadata.nc"),
+                engine="h5netcdf"
+            )
+        except Exception as e:
+            logger.warning(f"❗ Gagal menyimpan obs_metadata.nc: {e}")
+
+        # Simpan konfigurasi model
+        config = {
+            'time_seq': self.time_seq,
+            'lstm_units': self.lstm_units,
+            'learning_rate': self.learning_rate
+        }
+        with open(os.path.join(path, "config.json"), 'w') as f:
+            json.dump(config, f, cls=NumpyEncoder)
+
+        logger.info(f"✅ Model dan komponen berhasil disimpan.")
 
     @classmethod
     def load(cls, path: str):
-        with open(os.path.join(path, "config.json"), 'r') as f: config = json.load(f)
-        instance = cls(**config)
-        
-        with open(os.path.join(path, "target_info.json"), 'r') as f: target_info = json.load(f)
-        instance.target_dims = tuple(target_info['dims'])
-        instance.target_coords = {k: xr.DataArray(v, dims=target_info['coords'][k]['dims']) for k, v in target_info['coords'].items()}
-        instance.obs_mask = xr.DataArray(target_info['obs_mask'], coords={'latitude': instance.target_coords['latitude'], 'longitude': instance.target_coords['longitude']}, dims=['latitude', 'longitude'])
+        logger.info(f"🔄 Memuat model dari direktori: {path}...")
+        required_files = ["config.json", "model.keras", "scaler_X.gz", "scaler_y.gz", "obs_metadata.nc"]
+        for fname in required_files:
+            full_path = os.path.join(path, fname)
+            if not os.path.exists(full_path):
+                raise FileNotFoundError(f"File tidak ditemukan: {full_path}")
 
-        instance.model = keras_load_model(os.path.join(path, "model.keras"), custom_objects={"LeakyReLU": LeakyReLU})
+        with open(os.path.join(path, "config.json"), 'r') as f:
+            config = json.load(f)
+        instance = cls(**config)
+        instance.model = keras_load_model(
+            os.path.join(path, "model.keras"),
+            custom_objects={"LeakyReLU": LeakyReLU},
+            compile=False)
         instance.scaler_X = joblib.load(os.path.join(path, "scaler_X.gz"))
         instance.scaler_y = joblib.load(os.path.join(path, "scaler_y.gz"))
-        print(f"✅ Model dan komponen berhasil dimuat dari: {path}")
+        instance.obs_for_metadata = xr.open_dataarray(os.path.join(path, "obs_metadata.nc"))
+        instance.model.compile(
+            optimizer=Adam(learning_rate=instance.learning_rate),
+            loss='mse',
+            metrics=['mae'])
+        logger.info(f"✅ Model dan komponen berhasil dimuat.")
         return instance
