@@ -4,10 +4,8 @@ Paket Python untuk melakukan pengolahan koreksi bias model iklim global mengguna
 # SamudraAI 🌊
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
-![PyPI version](https://img.shields.io/pypi/v/samudra-ai.svg)
-![Python versions](https://img.shields.io/pypi/pyversions/samudra-ai.svg)
 
-Paket Python untuk koreksi bias model iklim menggunakan arsitektur deep learning CNN-BiLSTM.
+Paket Python untuk koreksi bias model iklim menggunakan arsitektur deep learning CNN-BiLSTM. 
 
 **SamudraAI** memudahkan peneliti dan praktisi di bidang ilmu iklim untuk menerapkan metode koreksi bias yang canggih pada data GCM (General Circulation Model) menggunakan data observasi sebagai referensi.
 
@@ -25,9 +23,6 @@ Anda dapat menginstal SamudraAI langsung dari PyPI menggunakan pip:
 ```bash
 pip install samudra-ai
 ```
-```bash
-pip install numpy pandas xarray tensorflow scikit-learn matplotlib h5netcdf cftime scikit-image joblib
-```
 
 ## Cara Penggunaan Cepat (Quick Start)
 
@@ -39,57 +34,46 @@ Pastikan Anda memiliki data dalam format `xarray.DataArray`:
 * `obs_data`: Data observasi/reanalysis (sebagai target `y`).
 * `gcm_future_data`: Data GCM masa depan yang ingin dikoreksi.
 
-### 2. Latih Model
-Impor kelas `SamudraAI`, inisialisasi, dan latih model dengan data Anda.
-
-```python
-import xarray as xr
+```bash
+### 2. import model
 from samudra_ai import SamudraAI
+from samudra_ai.data_loader import load_and_mask_dataset
 
-# Asumsikan data sudah dimuat ke dalam objek xarray DataArray
-# gcm_hist_data = xr.open_dataarray(...)
-# obs_data = xr.open_dataarray(...)
+### 3. Load GCM dan Observasi
+gcm = load_and_mask_dataset("canesm5_historical_1993_2014.nc", "zos", (-15, 10), (90, 145), ("1993", "2014"))
+obs = load_and_mask_dataset("cmems_obs_1993_2024.nc", "sla", (-15, 10), (90, 145), ("1993", "2014"))
 
-# Inisialisasi model
+### 4. Inisialisasi dan Training Model
 model = SamudraAI(time_seq=9)
+model.fit(gcm, obs, epochs=100)
+model.plot_history(output_dir="hasil_plot/")
 
-# Latih model
-# Proses ini akan menangani normalisasi, pembuatan sekuens, dan training
-history = model.fit(
-    x_data_hist=gcm_hist_data,
-    y_data_obs=obs_data,
-    epochs=50,
-    batch_size=8
+### 5. Simpan dan/atau muat ulang model
+model.save("canesm5_model_final")
+model = SamudraAI.load("canesm5_model_final")
+
+### 6. Evaluasi Historical dan Simpan Hasil Koreksi
+eval_df, corrected_hist = model.evaluate_and_plot(
+    raw_gcm_data=gcm,
+    ref_data=obs,
+    var_name_ref="sla",
+    output_dir="hasil_evaluasi/",
+    save_corrected_path="canesm5_historical_terkoreksi.nc"
 )
 
-print("✅ Model selesai dilatih!")
+### 6. Koreksi Proyeksi SSP
+ssp = load_and_mask_dataset("canesm5_ssp245_2015_2100.nc", "zos", (-15, 10), (90, 145), ("2025", "2100"))
+corrected_proj = model.correction(ssp, save_path="canesm5_ssp245_terkoreksi.nc")
 ```
 
-### 3. Simpan Model yang Telah Dilatih
-Sangat direkomendasikan untuk menyimpan model Anda agar tidak perlu melatih ulang.
+## Best Practice
 
-```python
-# Simpan semua komponen (model, scaler, konfigurasi) ke sebuah direktori
-model.save("model_tersimpan/model_ssh_indo")
-```
-
-### 4. Lakukan Prediksi (Koreksi)
-Muat kembali model yang tersimpan dan gunakan untuk mengoreksi data di masa depan.
-
-```python
-# Asumsikan gcm_future_data sudah dimuat
-# gcm_future_data = xr.open_dataarray(...)
-
-# Muat model dari direktori
-loaded_model = SamudraAI.load("model_tersimpan/model_ssh_indo")
-
-# Lakukan koreksi pada data baru
-corrected_data = loaded_model.predict(gcm_future_data)
-
-# Tampilkan atau simpan hasilnya
-print(corrected_data)
-# corrected_data.to_netcdf("hasil_koreksi.nc")
-```
+* ✅ Disarankan menggunakan TensorFlow GPU untuk performa optimal
+* ✅ Disarankan memiliki memory / RAM yang cukup untuk pengolahan data dengan resolusi tinggi dan luasan domain yang besar
+* ✅ Jalankan pelatihan secara penuh di lingkungan lokal
+* ⚠️ Hindari mencampur save/load model .keras antar environment yang berbeda
+* ⚠️ Menggunakan Docker tetap bisa berjalan, namun proses save and load (penggunaan no.5) tidak bisa diproses karena perbedaan env
+* 💡 Format .nc hasil koreksi bisa langsung digunakan untuk plotting dan analisis
 
 ## Lisensi
 
