@@ -4,6 +4,8 @@ Paket Python untuk melakukan pengolahan koreksi bias model iklim global mengguna
 # SamudraAI 🌊
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+[![PyPI version](https://badge.fury.io/py/samudra-ai.svg)](https://pypi.org/project/samudra-ai/)
+[![Python](https://img.shields.io/pypi/pyversions/samudra-ai.svg)](https://pypi.org/project/samudra-ai/)
 
 Paket Python untuk koreksi bias model iklim menggunakan arsitektur deep learning CNN-BiLSTM. 
 
