@@ -16,7 +16,11 @@ def standardize_dims(ds: xr.DataArray) -> xr.DataArray:
         if name in ds_temp.dims: rename_dict[name] = 'lat'
     for name in ['longitude', 'x', 'i']:
         if name in ds_temp.dims: rename_dict[name] = 'lon'
-    return ds_temp.rename(rename_dict)[var_name]
+    da = ds_temp.rename(rename_dict)[var_name]
+    # pastikan urutan time, lat, lon jika ada
+    if all(dim in da.dims for dim in ["time", "lat", "lon"]):
+        da = da.transpose("time", "lat", "lon")
+    return da
 
 def compute_metrics(obs, model):
     """Menghitung metrik statistik antara data observasi dan model."""

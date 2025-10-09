@@ -25,7 +25,7 @@ def prepare_training_data(x_data, y_data, time_seq, seed):
     y_seq = np.array([y_scaled[i+time_seq-1] for i in range(len(y_scaled) - time_seq)])
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X_seq[..., np.newaxis], y_seq[..., np.newaxis], test_size=0.2, random_state=seed, shuffle=False)
+        X_seq[..., np.newaxis], y_seq, test_size=0.2, random_state=seed, shuffle=False)
 
     return X_train, X_test, y_train, y_test, scaler_X, scaler_y
 

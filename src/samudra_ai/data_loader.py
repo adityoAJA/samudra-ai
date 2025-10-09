@@ -23,7 +23,19 @@ def load_and_mask_dataset(file_path: str, var_name: str, lat_range: tuple, lon_r
     with xr.open_dataset(file_path, engine="h5netcdf", decode_times=True) as data:
         if var_name not in data.variables:
             raise ValueError(f"Variabel '{var_name}' tidak ditemukan.")
-        if 'time' not in data.coords:
+        
+        # === Deteksi nama dimensi waktu ===
+        time_candidates = ["time", "valid_time", "date", "Time", "t"]
+        detected_time = next((t for t in time_candidates if t in data.dims or t in data.coords), None)
+        if not detected_time:
+            raise ValueError("Dimensi waktu tidak ditemukan. Harus ada salah satu dari: time/valid_time/date/Time/t")
+
+        # Rename jadi "time" supaya konsisten
+        if detected_time != "time":
+            data = data.rename({detected_time: "time"})
+
+        # Pastikan koordinat waktu ada
+        if "time" not in data.coords:
             raise ValueError("Koordinat 'time' tidak ditemukan.")
 
         time_type = type(data.time.values[0])
@@ -42,6 +54,12 @@ def load_and_mask_dataset(file_path: str, var_name: str, lat_range: tuple, lon_r
         detected_lon = next((lon for lon in lon_names if lon in sliced_data.dims), None)
         if not detected_lat or not detected_lon:
             raise ValueError("Dimensi lat/lon tidak ditemukan.")
+        
+        # sort ke menaik agar slicing slice(a, b) selalu konsisten
+        if sliced_data[detected_lat][0] > sliced_data[detected_lat][-1]:
+            sliced_data = sliced_data.sortby(detected_lat)
+        if sliced_data[detected_lon][0] > sliced_data[detected_lon][-1]:
+            sliced_data = sliced_data.sortby(detected_lon)
 
         masked_data = sliced_data.sel(
             {detected_lat: slice(*lat_range), detected_lon: slice(*lon_range)}
