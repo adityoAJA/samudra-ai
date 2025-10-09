@@ -34,7 +34,8 @@ pip install samudra-ai
 * ✅ Jalankan pelatihan secara penuh di lingkungan lokal
 * ⚠️ Hindari mencampur save/load model .keras antar environment yang berbeda
 * ⚠️ Menggunakan Docker tetap bisa berjalan, namun proses save and load (penggunaan no.5) tidak bisa diproses karena perbedaan env
-* 💡 Format .nc hasil koreksi bisa langsung digunakan untuk plotting dan analisis
+* 💡 Format data .nc dengan Regular Grid (gr)
+* 💡 Hasil koreksi bisa langsung digunakan untuk plotting dan analisis
 
 ## Lisensi
 
