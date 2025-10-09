@@ -5,7 +5,7 @@ from .trainer import prepare_training_data, plot_training_history
 from .evaluator import evaluate_model, plot_spatial_comparison, mask_land, mask_ocean
 from .preprocess_dcpp import preprocess_dcpp
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 __all__ = [
     'SamudraAI',
     'SamudraAI2',
