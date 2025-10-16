@@ -48,10 +48,13 @@ def load_and_mask_dataset(file_path: str, var_name: str, lat_range: tuple, lon_r
         end_time_sel = data.time.sel(time=end_time, method="nearest").values
         sliced_data = data[var_name].sel(time=slice(start_time_sel, end_time_sel))
 
+        # Cari dimensi latitude dan longitude (case-insensitive)
+        dims_lower = {dim.lower(): dim for dim in sliced_data.dims}
+
         lat_names = ["lat", "latitude", "j", "y"]
         lon_names = ["lon", "longitude", "i", "x"]
-        detected_lat = next((lat for lat in lat_names if lat in sliced_data.dims), None)
-        detected_lon = next((lon for lon in lon_names if lon in sliced_data.dims), None)
+        detected_lat = next((dims_lower[name] for name in lat_names if name in dims_lower), None)
+        detected_lon = next((dims_lower[name] for name in lon_names if name in dims_lower), None)
         if not detected_lat or not detected_lon:
             raise ValueError("Dimensi lat/lon tidak ditemukan.")
         
@@ -69,4 +72,5 @@ def load_and_mask_dataset(file_path: str, var_name: str, lat_range: tuple, lon_r
             raise ValueError("Data kosong setelah slicing.")
 
         # ✨ Standarisasi dimensi agar selalu lat/lon konsisten
+
         return standardize_dims(masked_data)
