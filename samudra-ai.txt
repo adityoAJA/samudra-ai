@@ -1,0 +1,132 @@
+# 1. Install Library
+!pip install samudra-ai
+
+# 2. Import Library
+from samudra_ai import SamudraAI, SamudraAI2
+from samudra_ai.data_loader import load_and_mask_dataset
+from samudra_ai.utils import regrid_if_needed
+import xarray as xr
+import os
+
+# 3. Load Data
+FILE_GCM_HISTORICAL = "/path_historical.nc"
+FILE_OBSERVATION = "/path_observasi.nc"
+FILE_GCM_PROJECTION = "/path_proyeksi.nc"
+
+# 4. Cek Atribut Data (Variabel dan Satuan)
+ds = xr.open_dataset(FILE_GCM_HISTORICAL)
+print(ds.variables)     
+
+ds1 = xr.open_dataset(FILE_OBSERVATION)
+print(ds1.variables)     
+
+ds2 = xr.open_dataset(FILE_GCM_PROJECTION)
+print(ds2.variables)    
+
+
+# 5. Inisialisasi Data
+## set nama GCM, variabel, koordinat dan waktu
+GCM_NAME = "miroc6"
+VAR_NAME_GCM = "tas"
+VAR_NAME_OBS = "t2m"
+MODEL = "SamudraAI2" # SamudraAI, SamudraAI2
+DOMAIN = "sulawesi"
+LAT_RANGE = (-8, 5)
+LON_RANGE = (118, 128)
+TIME_RANGE_TRAINING = ("1981-01-01", "2010-12-31")
+TIME_RANGE_PROJECTION = ("2021-01-01", "2100-12-31")
+
+## set folder output
+OUTDIR = "/path_hasil/"
+os.makedirs(OUTDIR, exist_ok=True)
+
+# 6. Load dan Mask Data
+gcm_hist = load_and_mask_dataset(FILE_GCM_HISTORICAL, VAR_NAME_GCM, LAT_RANGE, LON_RANGE, TIME_RANGE_TRAINING)
+obs_data = load_and_mask_dataset(FILE_OBSERVATION, VAR_NAME_OBS, LAT_RANGE, LON_RANGE, TIME_RANGE_TRAINING)
+gcm_proj = load_and_mask_dataset(FILE_GCM_PROJECTION, VAR_NAME_GCM, LAT_RANGE, LON_RANGE, TIME_RANGE_PROJECTION)
+
+# AUTO FIX GRID 2D TO 1D (bisa diskip kalo grid nya regular bukan 2D)
+gcm_hist = regrid_if_needed(gcm_hist, obs_data)
+gcm_proj = regrid_if_needed(gcm_proj, obs_data)
+
+# 7. Konversi Satuan (Bila diperlukan buka tanda pagar)
+## Konversi Kelvin → Celsius
+#obs_data = obs_data - 273.15
+#obs_data.attrs["units"] = "degC"
+#gcm_hist = gcm_hist - 273.15
+#gcm_hist.attrs["units"] = "degC"
+#gcm_proj = gcm_proj - 273.15
+#gcm_proj.attrs["units"] = "degC"
+
+# # Konversi kg m-2 s-1 → mm
+# gcm_hist = gcm_hist * 86400
+# gcm_hist.attrs["units"] = "mm/day"
+# gcm_proj = gcm_proj * 86400
+# gcm_proj.attrs["units"] = "mm/day"
+
+# # Konversi kg m-2 s-1 → mm/month
+# # Konversi GCM historical
+# seconds_in_month_hist = gcm_hist.time.dt.days_in_month * 24 * 3600
+# gcm_hist = gcm_hist * xr.DataArray(seconds_in_month_hist, dims="time")
+# gcm_hist.attrs["units"] = "mm/month"
+# print(gcm_hist)
+# # Konversi GCM projection
+# seconds_in_month_proj = gcm_proj.time.dt.days_in_month * 24 * 3600
+# gcm_proj = gcm_proj * xr.DataArray(seconds_in_month_proj, dims="time")
+# gcm_proj.attrs["units"] = "mm/month"
+# print(gcm_proj)
+
+# # Konversi kph → m/s
+# obs_data = obs_data / 3.6
+# obs_data.attrs["units"] = "m/s"
+
+# # Konversi cm → m
+# obs_data = obs_data / 100
+# obs_data.attrs["units"] = "m"
+
+# 8. Training Model
+model = SamudraAI2(time_seq=9) # SamudraAI untuk CNN-LSTM, SamudraAI2 untuk ConvLSTM2D # time_seq adalah jumlah periode (harian/bulanan) utk ekstrak pola temporal (bisa disesuaikan)
+model = SamudraAI2(time_seq=9, mode="hujan") # aktifkan mode=hujan bila mau menggunakan fitur log dan seasonal
+model.fit(gcm_hist, obs_data)
+model.plot_history(output_dir=f"{OUTDIR}/hasil_plot_{MODEL}_{GCM_NAME}_{VAR_NAME_GCM}_{DOMAIN}")
+
+# 9. Simpan dan Load Model (Skip bila tidak ingin menyimpan dan langsung gunakan persamaan model)
+model.save(f"{OUTDIR}{GCM_NAME}_{MODEL}_final")
+loaded_model = SamudraAI.load(f"{OUTDIR}{GCM_NAME}_{MODEL}_final")
+
+# 10. Evaluasi Hasil Model
+print("\n--Evaluasi dan simpan koreksi historical--")
+output_hist = f"{OUTDIR}/{GCM_NAME}_{VAR_NAME_GCM}_{MODEL}_historis_{DOMAIN}_terkoreksi.nc"
+os.makedirs(os.path.dirname(output_hist), exist_ok=True)
+
+evaluation_df, corrected_historical = model.evaluate_and_plot(
+    raw_gcm_data=gcm_hist,
+    ref_data=obs_data,
+    var_name_ref=VAR_NAME_OBS,
+    output_dir=f"{OUTDIR}/hasil_evaluasi_{MODEL}_{GCM_NAME}_{VAR_NAME_GCM}_{DOMAIN}",
+    mask_type="ocean",
+    save_corrected_path=output_hist)
+
+print("\n--DataFrame Hasil Evaluasi--")
+print(evaluation_df)
+
+# 11. Koreksi Data Proyeksi
+print("\n--Koreksi data proyeksi masa depan--")
+output_proj = f"{OUTDIR}/{GCM_NAME}_{VAR_NAME_GCM}_{MODEL}_proyeksi_{DOMAIN}_terkoreksi.nc"
+
+corrected_projection = model.correction(gcm_proj, save_path=output_proj)
+
+print("\n--- Koreksi Proyeksi Selesai ---")
+
+# 12. Plot climate analysis
+# plot analisis klimat
+corrected_projection = corrected_projection.load()
+corrected_historical = corrected_historical.load()
+model.generate_climate_analysis(
+    hist_data=corrected_historical,
+    future_data=corrected_projection,
+    var_label="Suhu Udara (°C)", # °C, mm/day, dst
+    output_dir=f"{OUTDIR}/climate_analysis"
+)
+
+print("\n SEMUA PROSES SELESAI!")
