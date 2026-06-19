@@ -2,9 +2,7 @@
 !pip install samudra-ai
 
 # 2. Import Library
-from samudra_ai import SamudraAI, SamudraAI2
-from samudra_ai.data_loader import load_and_mask_dataset
-from samudra_ai.utils import regrid_if_needed
+from samudra_ai import SamudraAI, SamudraAI2, SamudraAI3, SamudraAI1D, load_station_data, load_and_mask_dataset
 import xarray as xr
 import os
 
@@ -16,10 +14,8 @@ FILE_GCM_PROJECTION = "/path_proyeksi.nc"
 # 4. Cek Atribut Data (Variabel dan Satuan)
 ds = xr.open_dataset(FILE_GCM_HISTORICAL)
 print(ds.variables)     
-
 ds1 = xr.open_dataset(FILE_OBSERVATION)
 print(ds1.variables)     
-
 ds2 = xr.open_dataset(FILE_GCM_PROJECTION)
 print(ds2.variables)    
 
@@ -44,6 +40,7 @@ os.makedirs(OUTDIR, exist_ok=True)
 gcm_hist = load_and_mask_dataset(FILE_GCM_HISTORICAL, VAR_NAME_GCM, LAT_RANGE, LON_RANGE, TIME_RANGE_TRAINING)
 obs_data = load_and_mask_dataset(FILE_OBSERVATION, VAR_NAME_OBS, LAT_RANGE, LON_RANGE, TIME_RANGE_TRAINING)
 gcm_proj = load_and_mask_dataset(FILE_GCM_PROJECTION, VAR_NAME_GCM, LAT_RANGE, LON_RANGE, TIME_RANGE_PROJECTION)
+# sta_data = load_station_data(FILE_OBSERVATION, LAT_RANGE, LON_RANGE, TIME_RANGE_TRAINING) # aktifkan ini dan nonaktifkan obs_data bila menggunakan referensi titik stasiun
 
 # AUTO FIX GRID 2D TO 1D (bisa diskip kalo grid nya regular bukan 2D)
 gcm_hist = regrid_if_needed(gcm_hist, obs_data)
@@ -85,14 +82,19 @@ gcm_proj = regrid_if_needed(gcm_proj, obs_data)
 # obs_data.attrs["units"] = "m"
 
 # 8. Training Model
-model = SamudraAI2(time_seq=9) # SamudraAI untuk CNN-LSTM, SamudraAI2 untuk ConvLSTM2D # time_seq adalah jumlah periode (harian/bulanan) utk ekstrak pola temporal (bisa disesuaikan)
-model = SamudraAI2(time_seq=9, mode="hujan") # aktifkan mode=hujan bila mau menggunakan fitur log dan seasonal
-model.fit(gcm_hist, obs_data)
+model = SamudraAI2(time_seq=9, mode="hujan") # SamudraAI, SamudraAI2, SamudraAI3 | time_seq adalah jumlah periode (harian/bulanan) utk ekstrak pola temporal (bisa disesuaikan) | aktifkan mode=hujan bila mau menggunakan fitur log dan seasonal
+model.fit(gcm_hist, obs_data) # ganti obs_data dengan sta_data kalo menggunakan data titik stasiun sebagai referensi/target
 model.plot_history(output_dir=f"{OUTDIR}/hasil_plot_{MODEL}_{GCM_NAME}_{VAR_NAME_GCM}_{DOMAIN}")
 
 # 9. Simpan dan Load Model (Skip bila tidak ingin menyimpan dan langsung gunakan persamaan model)
-model.save(f"{OUTDIR}{GCM_NAME}_{MODEL}_final")
-loaded_model = SamudraAI.load(f"{OUTDIR}{GCM_NAME}_{MODEL}_final")
+save_path = f"{OUTDIR}/{GCM_NAME}_{MODEL}_final"
+model.save(save_path)
+print(f"✅ Model disimpan di {save_path}")
+
+print("🔄 Memuat model...")
+loaded_model = SamudraAI.load(f"{OUTDIR}/{GCM_NAME}_{MODEL}_final")  # kalau model.fit pakai SamudraAI, maka loaded_model juga pakai SamudraAI
+print("✅ Model berhasil dimuat.")
+model = loaded_model
 
 # 10. Evaluasi Hasil Model
 print("\n--Evaluasi dan simpan koreksi historical--")
@@ -104,7 +106,7 @@ evaluation_df, corrected_historical = model.evaluate_and_plot(
     ref_data=obs_data,
     var_name_ref=VAR_NAME_OBS,
     output_dir=f"{OUTDIR}/hasil_evaluasi_{MODEL}_{GCM_NAME}_{VAR_NAME_GCM}_{DOMAIN}",
-    mask_type="ocean",
+    mask_type=None, # None, land, ocean
     save_corrected_path=output_hist)
 
 print("\n--DataFrame Hasil Evaluasi--")
@@ -128,5 +130,9 @@ model.generate_climate_analysis(
     var_label="Suhu Udara (°C)", # °C, mm/day, dst
     output_dir=f"{OUTDIR}/climate_analysis"
 )
+
+# 13. Plot uncertainty
+model.analyze_uncertainty(gcm_hist, VAR_NAME_GCM, obs_data, f"{OUTDIR}/hasil_uncertainty/", mask_type="land") # semakin banyak sampel semakin lama namun hasil semakin detail
+model.analyze_uncertainty(gcm_proj, VAR_NAME_GCM, obs_data, f"{OUTDIR}/hasil_uncertainty/", mask_type="land")
 
 print("\n SEMUA PROSES SELESAI!")
